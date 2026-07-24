@@ -1,0 +1,50 @@
+services:
+  toilet2:
+    build:
+      context: .
+    image: lmio-toilet2:latest
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ${TOILET_ENV_FILE:-.env}
+    environment:
+      # Uvicorn understands this standard variable. Set it to the immediate
+      # trusted CMS reverse proxy address or network.
+      FORWARDED_ALLOW_IPS: ${TOILET_FORWARDED_ALLOW_IPS:-127.0.0.1}
+    ports:
+      - "${TOILET_DOCKER_BIND_ADDRESS:-127.0.0.1}:${TOILET_DOCKER_PORT:-8000}:8000"
+    volumes:
+      # Mount the complete directory so SQLite's database, WAL, and SHM files
+      # share the same durable filesystem.
+      - toilet_data:/var/lib/lmio-toilet
+    extra_hosts:
+      # Keep the HTTPS hostname for certificate verification while routing
+      # Control traffic over its private EC2 address.
+      - "${TOILET_CONTROL_DNS_NAME:-ctrl.lmio.lt}=${TOILET_CONTROL_PRIVATE_IP:-172.31.47.173}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/operator/login', timeout=5).read(1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+volumes:
+  toilet_data:
+    name: ${TOILET_DATA_VOLUME:-lmio-toilet-data}

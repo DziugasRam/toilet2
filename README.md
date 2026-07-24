@@ -150,8 +150,8 @@ In the Olimp-control UI:
 
 1. Import the contestant CSV independently from the CMS import.
 2. Assign each computer to a class/location and place it in the physical grid.
-3. Assign a nullable student to each computer. One student may be assigned to
-   several computers, including backups.
+3. Create the strict one-to-one contestant-computer mappings. Remove an
+   existing mapping before assigning either side to a different mapping.
 4. Keep Control staff accounts for Control administration only. Toilet
    administrator/proctor accounts are created in the toilet service.
 
@@ -195,6 +195,70 @@ is remapped only when its UUID exactly matches the migration's deterministic
 UUID5 formula and its saved name has one exact unique match in the live class
 catalog. Ambiguous, missing, non-migration, and conflicting mappings are left
 untouched and reported visibly in the admin page and audit log.
+
+### Docker Compose deployment
+
+The production Docker setup runs one unprivileged Toilet2 container and stores
+the SQLite database, WAL, and SHM files together in the persistent
+`lmio-toilet-data` Docker volume. From the standalone `toilet2` repository root:
+
+```bash
+cp .env.ec2.sample .env
+chmod 600 .env
+sudoedit .env
+
+sudo docker compose config
+sudo docker compose build
+sudo docker compose run --rm --no-deps toilet2 \
+  python -m toilet2.manage_operator toilet-admin \
+  --display-name "Toilet administrator" --admin
+sudo docker compose up -d
+sudo docker compose ps
+sudo docker compose logs -f toilet2
+```
+
+The operator command prompts twice for a password and initializes the same
+database volume used by the service. There is no separate Toilet2 migration
+command: the provisioning CLI and application startup initialize or upgrade the
+SQLite schema. Startup also attempts a roster synchronization, but a Control
+failure is logged and does not fail the process health check. Confirm the sync
+explicitly from the Toilet administrator page.
+
+The EC2 sample keeps `TOILET_CONTROL_BASE_URL=https://ctrl.lmio.lt` so TLS
+verifies the deployed certificate, while Compose resolves that name to
+`172.31.47.173` inside the container. Prefer Route 53 private DNS over the
+included static mapping when available. The Control proxy and Django
+`ALLOWED_HOSTS` must accept `ctrl.lmio.lt`. Set
+`TOILET_FORWARDED_ALLOW_IPS` to the immediate trusted CMS proxy address or the
+narrowest applicable network.
+
+The container publishes port 8000 because the CMS proxy is on another instance.
+The Toilet EC2 security group must allow that port only from the CMS proxy
+security group. Do not expose it publicly. Continue to serve the browser-facing
+application only at `/toilet/` on the CMS HTTPS origin.
+
+The named volume survives image rebuilds, container replacement, and ordinary
+`docker compose down`. Never run `docker compose down -v` unless intentionally
+deleting all Toilet2 state. Keep Docker data on persistent encrypted EBS and use
+a SQLite-aware online backup while the service is running; do not copy only the
+live `toilet.db` file because committed data may still be in its WAL.
+
+To update the service after taking a backup:
+
+```bash
+git pull
+sudo docker compose up --build -d
+sudo docker compose logs --tail=100 toilet2
+```
+
+The direct process-level health probe is:
+
+```bash
+curl -fsS http://127.0.0.1:8000/operator/login >/dev/null
+```
+
+Run exactly one Compose service instance and never scale the `toilet2` service;
+the mutation coordinator and WebSocket fanout are intentionally single-process.
 
 ## Reverse proxy requirements
 
