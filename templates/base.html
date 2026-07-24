@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="{{ locale|default('en', true) }}">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}LMIO toilet{% endblock %}</title>
+    <style>
+        :root { color-scheme: light; font-family: system-ui, sans-serif; }
+        body { max-width: 1120px; margin: 2rem auto; padding: 0 1rem 4rem; color: #202124; }
+        h1 { font-size: 1.45rem; } h2 { font-size: 1.15rem; margin-top: 2rem; }
+        button { padding: .5rem .8rem; margin: .15rem; cursor: pointer; font-size: .95rem; }
+        input, select { padding: .42rem; font-size: .95rem; max-width: 100%; }
+        .topbar { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+        .card { border: 1px solid #c8c8c8; border-radius: 8px; padding: .8rem; margin: .55rem 0; }
+        .row { display: flex; justify-content: space-between; align-items: center; gap: .7rem; flex-wrap: wrap; }
+        .muted { color: #666; font-size: .88rem; }
+        .go { background: #18783a; color: white; padding: 1rem; border-radius: 8px; font-size: 1.25rem; text-align: center; }
+        .wait { background: #f4bd2c; padding: 1rem; border-radius: 8px; text-align: center; }
+        .warning { background: #fff0c7; border: 1px solid #d49b00; border-radius: 8px; padding: .75rem; margin: .5rem 0; }
+        .urgent { background: #ffe1e1; border-color: #b42318; }
+        .badge { display: inline-block; border-radius: 1rem; padding: .15rem .5rem; margin: .1rem; background: #ececec; font-size: .78rem; }
+        .class-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: .7rem; }
+        .class-summary { margin: 0; border-left-width: 6px; }
+        button.class-summary { width: 100%; color: inherit; font: inherit; text-align: left; }
+        button.class-summary:hover, button.class-summary:focus-visible {
+            border-color: #1a73e8;
+            box-shadow: 0 0 0 2px rgba(26, 115, 232, .18);
+        }
+        button.class-summary.selected { outline: 3px solid rgba(26, 115, 232, .3); }
+        .ok-card { border-left-color: #18783a; background: #f2fbf5; }
+        .warning-card { border-left-color: #d49b00; background: #fff9e8; }
+        .urgent-card { border-left-color: #b42318; background: #fff1f1; }
+        .summary-counts { display: grid; grid-template-columns: repeat(4, 1fr); gap: .35rem; margin-top: .7rem; text-align: center; }
+        .summary-counts strong, .summary-counts small { display: block; }
+        .summary-counts strong { font-size: 1.2rem; }
+        .request-form { display: flex; align-items: end; gap: .55rem; flex-wrap: wrap; }
+        .request-form label { display: grid; gap: .3rem; font-weight: 600; }
+        .room-shell { overflow-x: auto; padding: .2rem .15rem .8rem; }
+        .room-grid {
+            display: grid;
+            gap: .55rem;
+            min-width: max-content;
+            align-items: stretch;
+            grid-auto-rows: minmax(105px, auto);
+        }
+        .computer-card {
+            width: 155px;
+            min-height: 105px;
+            margin: 0;
+            padding: .65rem;
+            border: 1px solid #b8b8b8;
+            border-left: 5px solid #8b8b8b;
+            border-radius: 8px;
+            background: white;
+            color: inherit;
+            font: inherit;
+            text-align: left;
+            overflow-wrap: anywhere;
+        }
+        .computer-card:hover, .computer-card:focus-visible {
+            border-color: #1a73e8;
+            box-shadow: 0 0 0 2px rgba(26, 115, 232, .18);
+        }
+        .computer-card.has-request { border-left-color: #d49b00; background: #fff9e8; }
+        .computer-card.has-active { border-left-color: #18783a; background: #f2fbf5; }
+        .computer-card.has-urgent { border-left-color: #b42318; background: #fff1f1; }
+        .computer-name, .student-name, .student-id { display: block; }
+        .computer-name { font-weight: 700; margin-bottom: .45rem; }
+        .student-name { font-size: .9rem; }
+        .student-id { color: #666; font-size: .78rem; }
+        .request-count { margin-top: .45rem; }
+        .unplaced-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+            gap: .55rem;
+        }
+        dialog {
+            width: min(560px, calc(100vw - 2rem));
+            max-height: calc(100vh - 2rem);
+            padding: 0;
+            border: 0;
+            border-radius: 10px;
+            box-shadow: 0 18px 65px rgba(0, 0, 0, .35);
+        }
+        dialog::backdrop { background: rgba(0, 0, 0, .45); }
+        .dialog-inner { padding: 1rem; }
+        .dialog-header { display: flex; justify-content: space-between; align-items: start; gap: 1rem; }
+        .dialog-header h2 { margin: 0; }
+        .dialog-close { margin: -.35rem; font-size: 1.35rem; line-height: 1; }
+        .dialog-actions { margin: .9rem 0 .2rem; }
+        .dialog-actions button { font-size: 1rem; padding: .6rem 1rem; }
+        .dialog-actions .muted { margin: .35rem 0 0; }
+        [hidden] { display: none !important; }
+        details { margin-top: .45rem; }
+        table { border-collapse: collapse; width: 100%; } th, td { border: 1px solid #ccc; padding: .4rem; text-align: left; }
+        code { overflow-wrap: anywhere; }
+        @media (max-width: 600px) {
+            body { margin-top: 1rem; }
+            .summary-counts { grid-template-columns: repeat(2, 1fr); }
+            .computer-card { width: 138px; }
+        }
+    </style>
+</head>
+<body>
+{% block body %}{% endblock %}
+</body>
+</html>

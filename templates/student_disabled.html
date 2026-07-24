@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}LMIO assistance{% endblock %}
+{% block body %}
+<div class="topbar">
+    <h1>Assistance requests</h1>
+</div>
+{# Deliberately bilingual and static: the contestant surface is disabled until
+   every contestant translation has been verified, so this page must not depend
+   on the locale negotiation it is replacing. #}
+<div class="warning">
+    <p>Contestants do not request assistance here during this contest. Raise your
+    hand and ask a proctor for a toilet break.</p>
+    <p>Dalyviai per šią olimpiadą pagalbos čia neprašo. Pakelkite ranką ir
+    paprašykite prižiūrėtojo išleisti į tualetą.</p>
+</div>
+{% endblock %}

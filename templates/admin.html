@@ -1,0 +1,358 @@
+{% extends "base.html" %}
+{% block title %}Admin — LMIO toilet{% endblock %}
+{% block body %}
+<div class="topbar">
+    <h1>Toilet configuration</h1>
+    <form method="post" action="{{ base_path }}/logout">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button>Log out</button>
+    </form>
+</div>
+{% if principal.is_proctor %}
+<p><a href="{{ base_path }}{% if principal.all_classes %}/proctor-all{% else %}/proctor{% endif %}">Proctor view</a></p>
+{% endif %}
+<p class="muted">Classes and computer assignments are read live from Olimp-control. This page manages toilets and their mappings to live classes.</p>
+<p><button type="button" onclick="syncStudents()">Sync contestant roster from Olimp-control</button></p>
+
+<h2>Toilets</h2>
+<div id="toilets">Loading…</div>
+
+<div class="row">
+    <h2>Live classes</h2>
+    <span><button onclick="reloadClasses()">Reload from Olimp-control</button><button onclick="refresh()">Refresh</button></span>
+</div>
+<div id="class-status"></div>
+<div id="classes">Loading…</div>
+
+<h2>Local proctor accounts</h2>
+<p class="muted">These credentials, roles, and class scopes belong only to the toilet application. They are independent from Olimp-control logins.</p>
+<div id="operators">Loading…</div>
+<div class="card">
+    <h3 id="operator-form-title">Create operator</h3>
+    <div class="request-form">
+        <label>Username <input id="operator-username" autocomplete="username"></label>
+        <label>Display name <input id="operator-display-name"></label>
+        <label>Password <input id="operator-password" type="password" autocomplete="new-password"></label>
+    </div>
+    <p>
+        <label><input id="operator-role-admin" type="checkbox"> administrator</label>
+        <label><input id="operator-role-proctor" type="checkbox"> proctor</label>
+        <label><input id="operator-all-classes" type="checkbox"> all classes</label>
+        <label><input id="operator-enabled" type="checkbox" checked> enabled</label>
+    </p>
+    <label>Proctor class scope
+        <select id="operator-class-scope" multiple size="5" style="display:block;min-width:18rem"></select>
+    </label>
+    <p class="muted" id="operator-password-help">A password is required for a new account.</p>
+    <button id="operator-save" type="button">Create</button>
+    <button id="operator-cancel" type="button" hidden>Cancel edit</button>
+</div>
+
+<div class="row">
+    <div>
+        <h2>Audit log</h2>
+        <p class="muted">The database keeps the complete append-only history. Choose how much detail to display here.</p>
+    </div>
+    <label>View
+        <select id="audit-view" onchange="refreshAudit()">
+            <option value="summary">Configuration &amp; incidents</option>
+            <option value="requests">Request lifecycle</option>
+            <option value="system">Sessions &amp; system detail</option>
+            <option value="all">All events</option>
+        </select>
+    </label>
+</div>
+<div id="audit">Loading…</div>
+
+<script>
+const BASE = {{ base_path | tojson }};
+const CSRF = {{ csrf_token | tojson }};
+const esc = value => String(value ?? "").replace(/[&<>'"]/g, character => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[character]));
+let currentConfig = {toilets: [], classes: [], operators: []};
+let editingOperator = null;
+
+async function post(path, fields = []) {
+    const body = new FormData();
+    fields.forEach(([key, value]) => body.append(key, value));
+    const response = await fetch(BASE + path, {method: "POST", body, headers: {"X-CSRF-Token": CSRF}});
+    if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        alert(error.detail || "Failed");
+        return response;
+    }
+    await refresh();
+    return response;
+}
+
+async function reloadClasses() {
+    await post("/api/admin/classes/reload");
+}
+
+async function syncStudents() {
+    const response = await post("/api/admin/students/sync");
+    if (response.ok) alert("Contestant roster synchronized.");
+}
+
+function render(state) {
+    const config = state.config;
+    currentConfig = config;
+    renderClassStatus(config);
+    document.getElementById("toilets").innerHTML = config.toilets.map(toilet => `
+        <div class="card row">
+            <span>
+                <input id="name-${toilet.id}" value="${esc(toilet.name)}">
+                <button onclick="post('/api/admin/toilets/${toilet.id}/rename', [['name', document.getElementById('name-${toilet.id}').value]])">Rename</button>
+            </span>
+            <span>
+                capacity <input id="cap-${toilet.id}" type="number" min="1" value="${toilet.capacity}" style="width:4rem">
+                <button onclick="post('/api/admin/toilets/${toilet.id}/capacity', [['capacity', document.getElementById('cap-${toilet.id}').value]])">Set</button>
+                <button onclick="confirm('Delete this toilet and reconcile affected requests?') && post('/api/admin/toilets/${toilet.id}/delete')">Delete</button>
+            </span>
+        </div>`).join("") + `
+        <div class="card">
+            <input id="new-name" placeholder="new toilet">
+            <input id="new-cap" type="number" min="1" value="1" style="width:4rem">
+            <button onclick="post('/api/admin/toilets', [['name', document.getElementById('new-name').value], ['capacity', document.getElementById('new-cap').value]])">Create</button>
+        </div>`;
+
+    document.getElementById("classes").innerHTML = config.classes.map(item => `
+        <div class="card row">
+            <span><b>${esc(item.name)}</b><br><code class="muted">${esc(item.id)}</code></span>
+            <select aria-label="Toilet for ${esc(item.name)}" onchange="post('/api/admin/classes/${encodeURIComponent(item.id)}/toilet', [['toilet_id', this.value]])">
+                <option value="">— no assignment —</option>
+                ${config.toilets.map(toilet => `<option value="${toilet.id}" ${item.toilet_id === toilet.id ? 'selected' : ''}>${esc(toilet.name)}</option>`).join("")}
+            </select>
+        </div>`).join("") || "No live classes are available.";
+    renderOperators(config);
+}
+
+function renderClassStatus(config) {
+    const messages = [];
+    if (config.class_catalog_error) {
+        messages.push(`
+            <div class="warning urgent">
+                <b>Live class catalog unavailable.</b>
+                Olimp-control returned ${esc(config.class_catalog_error)}. Stored
+                class mappings are hidden until the live catalog is available again.
+            </div>`);
+    }
+
+    const reconciliation = config.mapping_reconciliation || {};
+    if (reconciliation.error) {
+        messages.push(`
+            <div class="warning urgent">
+                <b>Legacy mapping reconciliation could not run.</b>
+                Olimp-control returned ${esc(reconciliation.error)}.
+            </div>`);
+    }
+    const reasonLabels = {
+        not_legacy_generated:
+            "This is not a migration-generated UUID, so matching it by name would be unsafe.",
+        ambiguous_local_name:
+            "More than one referenced legacy row has this name.",
+        live_name_not_found:
+            "No live Olimp-control class has this exact name.",
+        ambiguous_live_name:
+            "More than one live Olimp-control class has this exact name.",
+        target_already_mapped:
+            "The matching live UUID already has a different toilet mapping."
+    };
+    (reconciliation.unresolved || []).forEach(item => {
+        const targets = (item.live_target_ids || []).length
+            ? `<br><span class="muted">Possible live UUIDs: ${item.live_target_ids.map(esc).join(", ")}</span>`
+            : "";
+        const clear = item.toilet_id == null
+            ? ""
+            : `<button type="button" onclick="post('/api/admin/classes/${encodeURIComponent(item.legacy_public_id)}/toilet', [['toilet_id', '']])">Clear old mapping</button>`;
+        messages.push(`
+            <div class="warning">
+                <div class="row">
+                    <span>
+                        <b>Legacy class mapping needs attention: ${esc(item.legacy_name)}</b><br>
+                        <code>${esc(item.legacy_public_id)}</code><br>
+                        <span>${esc(reasonLabels[item.reason] || item.reason)}</span>
+                        ${targets}
+                    </span>
+                    ${clear}
+                </div>
+                <p class="muted">Choose the intended live class below explicitly
+                and review any local proctor scopes that used the old UUID.</p>
+            </div>`);
+    });
+    document.getElementById("class-status").innerHTML = messages.join("");
+}
+
+function renderOperators(config) {
+    const operators = config.operators || [];
+    const classNames = new Map((config.classes || []).map(item => [item.id, item.name]));
+    document.getElementById("operators").innerHTML = operators.map(operator => {
+        const scope = operator.all_classes
+            ? "all classes"
+            : (operator.class_scope || []).map(id => classNames.get(id) || id).join(", ") || "no classes";
+        const editButton = operator.username_safe === false
+            ? `<button type="button" disabled title="Delete and recreate this legacy account with a URL-safe username">Edit</button>`
+            : `<button type="button" data-edit-operator="${esc(operator.username)}">Edit</button>`;
+        return `<div class="card row">
+            <span><b>${esc(operator.display_name || operator.username)}</b>
+                <code class="muted">${esc(operator.username)}</code><br>
+                ${(operator.roles || []).map(role => `<span class="badge">${esc(role)}</span>`).join("")}
+                <span class="muted">${esc(scope)}${operator.enabled === false ? " — disabled" : ""}${operator.username_safe === false ? " — legacy unsafe username; delete and recreate" : ""}</span>
+            </span>
+            <span>
+                ${editButton}
+                <button type="button" data-delete-operator="${esc(operator.username)}">Delete</button>
+            </span>
+        </div>`;
+    }).join("") || "No local operators configured.";
+
+    const selectedScope = new Set(
+        editingOperator
+            ? (operators.find(item => item.username === editingOperator)?.class_scope || [])
+            : []
+    );
+    document.getElementById("operator-class-scope").innerHTML =
+        (config.classes || []).map(item =>
+            `<option value="${esc(item.id)}"${selectedScope.has(item.id) ? " selected" : ""}>${esc(item.name)}</option>`
+        ).join("");
+    updateOperatorScopeState();
+}
+
+function updateOperatorScopeState() {
+    const isProctor = document.getElementById("operator-role-proctor").checked;
+    if (!isProctor) document.getElementById("operator-all-classes").checked = false;
+    const allClasses = document.getElementById("operator-all-classes").checked;
+    document.getElementById("operator-all-classes").disabled = !isProctor;
+    document.getElementById("operator-class-scope").disabled = !isProctor || allClasses;
+}
+
+function resetOperatorForm() {
+    editingOperator = null;
+    document.getElementById("operator-form-title").textContent = "Create operator";
+    document.getElementById("operator-username").value = "";
+    document.getElementById("operator-username").disabled = false;
+    document.getElementById("operator-display-name").value = "";
+    document.getElementById("operator-password").value = "";
+    document.getElementById("operator-role-admin").checked = false;
+    document.getElementById("operator-role-proctor").checked = false;
+    document.getElementById("operator-all-classes").checked = false;
+    document.getElementById("operator-enabled").checked = true;
+    Array.from(document.getElementById("operator-class-scope").options)
+        .forEach(option => { option.selected = false; });
+    document.getElementById("operator-password-help").textContent =
+        "A password is required for a new account.";
+    document.getElementById("operator-save").textContent = "Create";
+    document.getElementById("operator-cancel").hidden = true;
+    updateOperatorScopeState();
+}
+
+function editOperator(username) {
+    const operator = (currentConfig.operators || []).find(item => item.username === username);
+    if (!operator) return;
+    editingOperator = username;
+    document.getElementById("operator-form-title").textContent = `Edit ${operator.username}`;
+    document.getElementById("operator-username").value = operator.username;
+    document.getElementById("operator-username").disabled = true;
+    document.getElementById("operator-display-name").value = operator.display_name || "";
+    document.getElementById("operator-password").value = "";
+    document.getElementById("operator-role-admin").checked = (operator.roles || []).includes("admin");
+    document.getElementById("operator-role-proctor").checked = (operator.roles || []).includes("proctor");
+    document.getElementById("operator-all-classes").checked = Boolean(operator.all_classes);
+    document.getElementById("operator-enabled").checked = operator.enabled !== false;
+    const scope = new Set(operator.class_scope || []);
+    Array.from(document.getElementById("operator-class-scope").options)
+        .forEach(option => { option.selected = scope.has(option.value); });
+    document.getElementById("operator-password-help").textContent =
+        "Leave the password blank to keep the current password.";
+    document.getElementById("operator-save").textContent = "Save";
+    document.getElementById("operator-cancel").hidden = false;
+    updateOperatorScopeState();
+    document.getElementById("operator-form-title").scrollIntoView({behavior: "smooth"});
+}
+
+async function saveOperator() {
+    const username = document.getElementById("operator-username").value.trim();
+    const displayName = document.getElementById("operator-display-name").value.trim();
+    const password = document.getElementById("operator-password").value;
+    if (!username || !displayName || (!editingOperator && !password)) {
+        alert("Username and display name are required; a new operator also needs a password.");
+        return;
+    }
+    const isAdmin = document.getElementById("operator-role-admin").checked;
+    const isProctor = document.getElementById("operator-role-proctor").checked;
+    if (!isAdmin && !isProctor) {
+        alert("Select at least one operator role.");
+        return;
+    }
+    const allClasses = isProctor &&
+        document.getElementById("operator-all-classes").checked;
+    const selectedClasses = Array.from(
+        document.getElementById("operator-class-scope").selectedOptions
+    );
+    if (isProctor && !allClasses && !selectedClasses.length) {
+        alert("Select at least one class or grant all-class access.");
+        return;
+    }
+    const fields = [
+        ["username", username],
+        ["password", password],
+        ["display_name", displayName],
+        ["all_classes", allClasses ? "true" : "false"],
+        ["enabled", document.getElementById("operator-enabled").checked ? "true" : "false"]
+    ];
+    if (isAdmin) fields.push(["roles", "admin"]);
+    if (isProctor) fields.push(["roles", "proctor"]);
+    if (isProctor && !allClasses) {
+        selectedClasses.forEach(option => fields.push(["class_scope", option.value]));
+    }
+    const path = editingOperator
+        ? `/api/admin/operators/${encodeURIComponent(editingOperator)}`
+        : "/api/admin/operators";
+    const response = await post(path, fields);
+    if (response.ok) resetOperatorForm();
+}
+
+async function deleteOperator(username) {
+    if (!confirm(`Delete local operator "${username}"?`)) return;
+    const response = await post("/api/admin/operator-deletion", [["username", username]]);
+    if (response.ok && editingOperator === username) resetOperatorForm();
+}
+
+function renderAudit(data) {
+    document.getElementById("audit").innerHTML = data.events.map(event => `
+        <div class="card">
+            <div class="row"><b>${esc(event.action.replaceAll('.', ' · '))}</b><span class="muted">${esc(event.occurred_at)}</span></div>
+            <div>${esc(event.actor)} → ${esc(event.target_type)} ${esc(event.target)}</div>
+            ${Object.keys(event.details || {}).length ? `<details class="muted"><summary>Details</summary><code>${esc(JSON.stringify(event.details))}</code></details>` : ''}
+        </div>`).join("") || "No events in this view.";
+}
+
+async function refreshAudit() {
+    const view = document.getElementById("audit-view").value;
+    const response = await fetch(BASE + `/api/admin/audit?limit=50&view=${encodeURIComponent(view)}`);
+    if (response.ok) renderAudit(await response.json());
+}
+
+async function refresh() {
+    const response = await fetch(BASE + "/api/admin/state");
+    if (response.status === 403) { location.href = BASE + "/operator/login"; return; }
+    if (response.ok) render(await response.json());
+    await refreshAudit();
+}
+
+document.getElementById("operators").addEventListener("click", event => {
+    const edit = event.target.closest("[data-edit-operator]");
+    if (edit) {
+        editOperator(edit.dataset.editOperator);
+        return;
+    }
+    const remove = event.target.closest("[data-delete-operator]");
+    if (remove) deleteOperator(remove.dataset.deleteOperator);
+});
+document.getElementById("operator-role-proctor").addEventListener("change", updateOperatorScopeState);
+document.getElementById("operator-all-classes").addEventListener("change", updateOperatorScopeState);
+document.getElementById("operator-save").addEventListener("click", saveOperator);
+document.getElementById("operator-cancel").addEventListener("click", resetOperatorForm);
+
+refresh();
+</script>
+{% endblock %}

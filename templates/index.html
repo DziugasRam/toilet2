@@ -1,0 +1,309 @@
+{% extends "base.html" %}
+{% block title %}LMIO assistance{% endblock %}
+{% block body %}
+<div class="topbar">
+    <h1><span data-i18n="hello">Hello</span>, {{ principal.display_name }}</h1>
+    <form method="post" action="{{ base_path }}/logout">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button data-i18n="logout">Log out</button>
+    </form>
+</div>
+
+<div id="status" aria-live="polite"></div>
+
+<section aria-labelledby="toilet-heading">
+    <h2 id="toilet-heading" data-i18n="toiletHeading">Toilet</h2>
+    <button id="btn-toilet" type="button" data-i18n="requestToilet">Request a toilet break</button>
+</section>
+
+<section id="general-request-section" aria-labelledby="general-request-heading" hidden>
+    <h2 id="general-request-heading" data-i18n="generalRequestHeading">Request assistance</h2>
+    <form id="general-request-form" class="request-form">
+        <label for="general-request-type">
+            <span data-i18n="requestType">Request type</span>
+            <select id="general-request-type" name="type"></select>
+        </label>
+        <button id="general-request-submit" type="submit" data-i18n="sendRequest">Send request</button>
+    </form>
+</section>
+
+<h2 data-i18n="openRequests">Open requests</h2>
+<div id="mine" class="muted" aria-live="polite" data-i18n="loading">Loading...</div>
+
+<script>
+const BASE = {{ base_path | tojson }};
+const CSRF = {{ csrf_token | tojson }};
+const INITIAL_LOCALE = {{ locale|default("en", true)|tojson }};
+const INITIAL_REQUEST_TYPES = {{ request_types|default({})|tojson }};
+const TRANSLATIONS = {
+    en: {
+        pageTitle: "LMIO assistance",
+        hello: "Hello",
+        logout: "Log out",
+        toiletHeading: "Toilet",
+        requestToilet: "Request a toilet break",
+        generalRequestHeading: "Request assistance",
+        requestType: "Request type",
+        chooseRequestType: "Choose a request type",
+        sendRequest: "Send request",
+        openRequests: "Open requests",
+        loading: "Loading...",
+        requestFailed: "The request could not be sent. Please try again.",
+        cancellationFailed: "The request could not be cancelled. Please try again.",
+        goNow: "You may go now",
+        askProctorDestination: "ask a proctor where to go",
+        reservedToilets: "Reserved toilets",
+        none: "none",
+        assignmentWarning: "Staff have been notified because your destination is uncertain.",
+        waiting: "Waiting",
+        queuePosition: "queue position",
+        destinationUnavailable: "A destination is not available yet",
+        askProctor: "Ask a proctor where to go. Staff have been notified.",
+        classUnknown: "class unknown",
+        cancel: "Cancel",
+        noOpenRequests: "No open requests.",
+        statusPending: "pending",
+        statusActive: "active",
+        statusDone: "completed",
+        statusCancelled: "cancelled",
+        toilet: "Toilet",
+        paper: "Additional paper",
+        water: "Water",
+        snack: "Snacks",
+        tech: "Technical assistance"
+    },
+    lt: {
+        pageTitle: "LMIO pagalba",
+        hello: "Sveiki",
+        logout: "Atsijungti",
+        toiletHeading: "Tualetas",
+        requestToilet: "Paprašyti išeiti į tualetą",
+        generalRequestHeading: "Paprašyti pagalbos",
+        requestType: "Prašymo tipas",
+        chooseRequestType: "Pasirinkite prašymo tipą",
+        sendRequest: "Siųsti prašymą",
+        openRequests: "Aktyvūs prašymai",
+        loading: "Kraunama...",
+        requestFailed: "Prašymo išsiųsti nepavyko. Bandykite dar kartą.",
+        cancellationFailed: "Prašymo atšaukti nepavyko. Bandykite dar kartą.",
+        goNow: "Galite eiti dabar",
+        askProctorDestination: "paklauskite prižiūrėtojo, kur eiti",
+        reservedToilets: "Rezervuoti tualetai",
+        none: "nėra",
+        assignmentWarning: "Prižiūrėtojams pranešta, nes kelionės tikslas nėra aiškus.",
+        waiting: "Laukiama",
+        queuePosition: "vieta eilėje",
+        destinationUnavailable: "Kelionės tikslas dar nepaskirtas",
+        askProctor: "Paklauskite prižiūrėtojo, kur eiti. Prižiūrėtojams pranešta.",
+        classUnknown: "klasė nežinoma",
+        cancel: "Atšaukti",
+        noOpenRequests: "Aktyvių prašymų nėra.",
+        statusPending: "laukiama",
+        statusActive: "vykdoma",
+        statusDone: "baigta",
+        statusCancelled: "atšaukta",
+        toilet: "Tualetas",
+        paper: "Papildomas popierius",
+        water: "Vanduo",
+        snack: "Užkandžiai",
+        tech: "Techninė pagalba"
+    }
+};
+
+const esc = value => String(value ?? "").replace(/[&<>'"]/g, character => (
+    {'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[character]
+));
+const normalizeLocale = value => String(value || "en").toLowerCase().split(/[-_]/)[0];
+let locale = Object.prototype.hasOwnProperty.call(
+    TRANSLATIONS, normalizeLocale(INITIAL_LOCALE)
+)
+    ? normalizeLocale(INITIAL_LOCALE)
+    : "en";
+let configuredRequestTypes = {};
+let latestRequests = [];
+
+function t(key) {
+    return TRANSLATIONS[locale][key] ?? TRANSLATIONS.en[key] ?? key;
+}
+
+function applyTranslations() {
+    document.documentElement.lang = locale;
+    document.querySelectorAll("[data-i18n]").forEach(element => {
+        element.textContent = t(element.dataset.i18n);
+    });
+    document.title = t("pageTitle");
+}
+
+function requestLabel(type, configuredLabel = "") {
+    return (TRANSLATIONS[locale][type] ?? configuredLabel) || type;
+}
+
+function statusLabel(status) {
+    const key = `status${String(status || "").replace(/^./, value => value.toUpperCase())}`;
+    return TRANSLATIONS[locale][key] ?? TRANSLATIONS.en[key] ?? status;
+}
+
+function setLocale(value) {
+    const next = normalizeLocale(value);
+    locale = Object.prototype.hasOwnProperty.call(TRANSLATIONS, next) ? next : "en";
+    applyTranslations();
+}
+
+function renderRequestOptions(requestTypes) {
+    configuredRequestTypes = Object.fromEntries(
+        Object.entries(requestTypes || {}).filter(([type]) => type !== "toilet")
+    );
+    const entries = Object.entries(configuredRequestTypes);
+    const section = document.getElementById("general-request-section");
+    section.hidden = entries.length === 0;
+    if (!entries.length) return;
+
+    const select = document.getElementById("general-request-type");
+    const previous = select.value;
+    select.innerHTML = `<option value="">${esc(t("chooseRequestType"))}</option>` +
+        entries.map(([type, label]) => {
+            const disabled = latestRequests.some(item => item.type === type);
+            return `<option value="${esc(type)}"${disabled ? " disabled" : ""}>${esc(requestLabel(type, label))}</option>`;
+        }).join("");
+    if (Object.prototype.hasOwnProperty.call(configuredRequestTypes, previous) &&
+            !latestRequests.some(item => item.type === previous)) {
+        select.value = previous;
+    }
+    updateGeneralSubmit();
+}
+
+function updateGeneralSubmit() {
+    const select = document.getElementById("general-request-type");
+    const submit = document.getElementById("general-request-submit");
+    submit.disabled = !select.value ||
+        latestRequests.some(item => item.type === select.value);
+}
+
+async function mutate(path, body) {
+    return fetch(BASE + path, {
+        method: "POST",
+        body,
+        headers: {"X-CSRF-Token": CSRF}
+    });
+}
+
+async function createRequest(type) {
+    if (!type) return;
+    const body = new FormData();
+    body.append("type", type);
+    const response = await mutate("/api/requests", body);
+    if (!response.ok) alert(t("requestFailed"));
+    await refresh();
+}
+
+async function cancelRequest(id) {
+    const response = await mutate(`/api/requests/${id}/cancel`, new FormData());
+    if (!response.ok) alert(t("cancellationFailed"));
+    await refresh();
+}
+
+function render(data) {
+    if (data.locale) setLocale(data.locale);
+    latestRequests = Array.isArray(data.requests) ? data.requests : [];
+    if (data.request_types !== undefined) {
+        renderRequestOptions(data.request_types);
+    } else {
+        renderRequestOptions(configuredRequestTypes);
+    }
+
+    const toilet = latestRequests.find(item => item.type === "toilet");
+    const status = document.getElementById("status");
+    const names = toilet ? (toilet.toilets || []).map(item => esc(item.name)).join(", ") : "";
+    const uncertain = toilet &&
+        (toilet.routing_mode === "fallback_all" || (toilet.alerts || []).length > 0);
+    if (toilet?.status === "active") {
+        const destination = uncertain
+            ? t("askProctorDestination")
+            : names;
+        status.innerHTML = `<div class="go">${esc(t("goNow"))}${destination ? ` — ${destination}` : ""}</div>`;
+        if (uncertain) {
+            status.innerHTML += `<div class="warning">${esc(t("assignmentWarning"))} ` +
+                `${esc(t("reservedToilets"))}: ${names || esc(t("none"))}.</div>`;
+        }
+        document.title = `${t("goNow")} — ${t("pageTitle")}`;
+    } else if (toilet) {
+        const blocked = toilet.blocked_reason ? ` — ${esc(t("destinationUnavailable"))}` : "";
+        status.innerHTML = `<div class="wait">${esc(t("waiting"))} — ${esc(t("queuePosition"))} ` +
+            `${esc(toilet.position || "?")}${blocked}</div>`;
+        if (uncertain) {
+            status.innerHTML += `<div class="warning">${esc(t("askProctor"))} ` +
+                `${esc(t("reservedToilets"))}: ${names || esc(t("none"))}.</div>`;
+        }
+        document.title = `#${toilet.position || "?"} — ${t("pageTitle")}`;
+    } else {
+        status.innerHTML = "";
+        document.title = t("pageTitle");
+    }
+
+    document.getElementById("mine").innerHTML = latestRequests.length
+        ? latestRequests.map(item => {
+            const configuredLabel = configuredRequestTypes[item.type] || item.type_label;
+            const classes = (item.classes || []).map(value => value.name).join(", ");
+            return `<div class="card row"><span><b>${esc(requestLabel(item.type, configuredLabel))}</b><br>` +
+                `<span class="muted">${esc(statusLabel(item.status))} — ` +
+                `${esc(classes || t("classUnknown"))}</span></span>` +
+                `${item.status === "pending" ? `<button type="button" data-cancel-id="${Number(item.id)}">${esc(t("cancel"))}</button>` : ""}</div>`;
+        }).join("")
+        : esc(t("noOpenRequests"));
+
+    document.getElementById("btn-toilet").disabled =
+        latestRequests.some(item => item.type === "toilet");
+    renderRequestOptions(configuredRequestTypes);
+}
+
+async function refresh() {
+    let response;
+    try {
+        response = await fetch(BASE + "/api/state");
+    } catch {
+        return;
+    }
+    if (response.status === 401) {
+        location.reload();
+        return;
+    }
+    if (response.ok) render(await response.json());
+}
+
+document.getElementById("btn-toilet").addEventListener("click", () => createRequest("toilet"));
+document.getElementById("general-request-type").addEventListener("change", updateGeneralSubmit);
+document.getElementById("general-request-form").addEventListener("submit", event => {
+    event.preventDefault();
+    createRequest(document.getElementById("general-request-type").value);
+});
+document.getElementById("mine").addEventListener("click", event => {
+    const button = event.target.closest("[data-cancel-id]");
+    if (button) cancelRequest(Number(button.dataset.cancelId));
+});
+
+let reconnectAttempts = 0;
+function connect() {
+    const scheme = location.protocol === "https:" ? "wss" : "ws";
+    const socket = new WebSocket(`${scheme}://${location.host}${BASE}/ws/student`);
+    socket.onmessage = event => {
+        reconnectAttempts = 0;
+        render(JSON.parse(event.data));
+    };
+    socket.onclose = event => {
+        if (event.code === 4401) {
+            location.reload();
+            return;
+        }
+        const baseDelay = event.code === 1013 ? 4000 : 1000;
+        const delay = Math.min(60000, baseDelay * (2 ** Math.min(reconnectAttempts++, 5)));
+        setTimeout(connect, delay * (0.75 + Math.random() * 0.5));
+    };
+}
+
+setLocale(INITIAL_LOCALE);
+renderRequestOptions(INITIAL_REQUEST_TYPES);
+connect();
+refresh();
+setInterval(refresh, 15000);
+</script>
+{% endblock %}

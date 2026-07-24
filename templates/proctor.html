@@ -1,0 +1,598 @@
+{% extends "base.html" %}
+{% block title %}{% if principal.all_classes %}All-class proctor{% else %}Proctor{% endif %} — LMIO toilet{% endblock %}
+{% block body %}
+<div class="topbar">
+    <div>
+        <h1>{% if principal.all_classes %}All-class proctor overview{% else %}Proctor requests{% endif %}</h1>
+        <span class="badge">{% if principal.all_classes %}All classes{% else %}Assigned classes only{% endif %}</span>
+    </div>
+    <form method="post" action="{{ base_path }}/logout">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button>Log out</button>
+    </form>
+</div>
+{% if principal.is_admin %}<p><a href="{{ base_path }}/admin">Configuration &amp; audit</a></p>{% endif %}
+
+<section id="overview-section" aria-labelledby="overview-heading">
+    <h2 id="overview-heading">Class overview</h2>
+    <p class="muted">Select a class to open its live physical layout.</p>
+    <div id="overview-warning" class="warning" hidden>Live class data is temporarily unavailable; the overview may be stale.</div>
+    <div id="class-overview" class="class-grid" aria-live="polite">Loading...</div>
+</section>
+
+<section id="layout-section" aria-labelledby="layout-heading" hidden>
+    <div class="row">
+        <h2 id="layout-heading">Class layout</h2>
+        <button id="close-layout" type="button"{% if not principal.all_classes %} hidden{% endif %}>Close layout</button>
+    </div>
+    <p id="layout-note" class="muted">Layout and student locations are read live from Olimp-control.</p>
+    <div id="class-layout" aria-live="polite">Loading...</div>
+</section>
+
+<h2>Toilet queue</h2>
+<div id="queue" aria-live="polite">Loading...</div>
+
+<h2>Assignment alerts</h2>
+<div id="alerts" aria-live="polite">Loading...</div>
+
+<section id="support-section" aria-labelledby="support-heading"{% if not general_requests_enabled %} hidden{% endif %}>
+    <h2 id="support-heading">Assistance requests</h2>
+    <div id="support" aria-live="polite">Loading...</div>
+</section>
+
+<dialog id="computer-dialog" aria-labelledby="computer-dialog-title">
+    <div class="dialog-inner">
+        <div class="dialog-header">
+            <div>
+                <h2 id="computer-dialog-title">Computer</h2>
+                <div id="computer-dialog-student" class="muted"></div>
+            </div>
+            <button class="dialog-close" type="button" aria-label="Close">&times;</button>
+        </div>
+        <div id="computer-dialog-actions" class="dialog-actions"></div>
+        <div id="computer-dialog-requests"></div>
+    </div>
+</dialog>
+
+<script>
+const BASE = {{ base_path | tojson }};
+const CSRF = {{ csrf_token | tojson }};
+const ALL_CLASSES = {{ principal.all_classes | tojson }};
+const GENERAL_REQUESTS_ENABLED = {{ general_requests_enabled|default(false)|tojson }};
+const esc = value => String(value ?? "").replace(/[&<>'"]/g, character => (
+    {'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[character]
+));
+const classId = value => value.id ?? value.public_id;
+const classIds = item => (item.classes || []).map(classId);
+const positiveInteger = (value, fallback = null, maximum = 100) => {
+    const parsed = Number(value);
+    return Number.isInteger(parsed) && parsed > 0 && parsed <= maximum ? parsed : fallback;
+};
+
+// Class layouts and queues are polled but rarely change. Replacing identical
+// markup would restart CSS transitions, drop keyboard focus, and clear half-typed
+// return times on every refresh, so only genuinely changed markup is written.
+const renderedMarkup = new WeakMap();
+function setMarkup(element, html) {
+    if (renderedMarkup.get(element) === html) return false;
+    renderedMarkup.set(element, html);
+    element.innerHTML = html;
+    return true;
+}
+
+let latestState = {queue: [], support: [], alerts: [], classes: [], all_classes: ALL_CLASSES};
+// Disabled support requests hide the whole assistance surface, but requests
+// that were created before the configuration changed stay resolvable.
+const supportVisible = () => GENERAL_REQUESTS_ENABLED || latestState.support.length > 0;
+let latestLayouts = [];
+let layoutLoaded = false;
+let layoutError = null;
+let selectedClassId = new URLSearchParams(location.search).get("class");
+const computerIndex = new Map();
+let openComputerKey = null;
+
+async function post(path, fields = []) {
+    const body = new FormData();
+    fields.forEach(([key, value]) => body.append(key, value));
+    const response = await fetch(BASE + path, {
+        method: "POST",
+        body,
+        headers: {"X-CSRF-Token": CSRF}
+    });
+    if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        alert(error.detail || "The action failed.");
+        return response;
+    }
+    closeComputerDialog();
+    await refresh();
+    return response;
+}
+
+async function returned(id, inputId = `return-${id}`) {
+    const input = document.getElementById(inputId);
+    const value = input?.value || "";
+    let timestamp = "";
+    if (value) {
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) {
+            alert("Invalid return time");
+            return;
+        }
+        timestamp = parsed.toISOString();
+    }
+    await post(`/api/proctor/return/${id}`, timestamp ? [["returned_at", timestamp]] : []);
+}
+
+function summaryCard(item, data) {
+    const id = classId(item);
+    const toilets = data.queue.filter(request => classIds(request).includes(id));
+    const support = data.support.filter(request => classIds(request).includes(id));
+    const alerts = data.alerts.filter(alert => classIds(alert).includes(id));
+    const active = toilets.filter(request => request.status === "active").length;
+    const waiting = toilets.filter(request => request.status === "pending").length;
+    const urgent = alerts.some(alert => alert.severity === "urgent");
+    const needsHelp = waiting || support.length || alerts.length;
+    const stateClass = urgent ? "urgent-card" : (needsHelp ? "warning-card" : "ok-card");
+    const selected = id === selectedClassId ? " selected" : "";
+    return `<button type="button" class="card class-summary ${stateClass}${selected}" ` +
+        `data-class-id="${esc(id)}" aria-label="Open ${esc(item.name)} layout">` +
+        `<span class="row"><b>${esc(item.name)}</b><span>${needsHelp ? "Needs attention" : "OK"}</span></span>` +
+        `<span class="summary-counts">` +
+            `<span><strong>${active}</strong><small>away</small></span>` +
+            `<span><strong>${waiting}</strong><small>waiting</small></span>` +
+            (supportVisible()
+                ? `<span><strong>${support.length}</strong><small>assistance</small></span>`
+                : "") +
+            `<span><strong>${alerts.length}</strong><small>alerts</small></span>` +
+        `</span></button>`;
+}
+
+function renderOverview(data) {
+    const cards = data.classes.map(item => summaryCard(item, data));
+    const globalQueue = data.queue.filter(item => classIds(item).length === 0);
+    const globalSupport = data.support.filter(item => classIds(item).length === 0);
+    const globalAlerts = data.alerts.filter(item => classIds(item).length === 0 || item.global_scope);
+    if (globalQueue.length || globalSupport.length || globalAlerts.length) {
+        cards.push(`<div class="card class-summary urgent-card">
+            <div class="row"><b>Unassigned / global</b><span>Needs attention</span></div>
+            <div class="summary-counts">
+                <span><strong>${globalQueue.length}</strong><small>toilet</small></span>
+                ${supportVisible()
+                    ? `<span><strong>${globalSupport.length}</strong><small>assistance</small></span>`
+                    : ""}
+                <span><strong>${globalAlerts.length}</strong><small>alerts</small></span>
+            </div>
+        </div>`);
+    }
+    setMarkup(
+        document.getElementById("class-overview"),
+        cards.join("") || "No classes are assigned to this proctor."
+    );
+}
+
+function requestsForComputer(computer) {
+    if (Array.isArray(computer.requests)) return computer.requests;
+    if (!computer.student) return [];
+    const userid = computer.student.userid ?? computer.student.username;
+    return [...latestState.queue, ...latestState.support].filter(
+        request => request.username === userid
+    );
+}
+
+function computerStateClass(requests) {
+    if (requests.some(request =>
+        (request.alerts || []).some(alert => alert.severity === "urgent"))) {
+        return " has-urgent";
+    }
+    if (requests.some(request => request.type === "toilet" && request.status === "active")) {
+        return " has-active";
+    }
+    return requests.length ? " has-request" : "";
+}
+
+function computerCard(computer, classInfo, placed) {
+    const machineId = computer.machine_id ?? computer.id;
+    const key = `${classId(classInfo)}:${machineId}`;
+    const requests = requestsForComputer(computer);
+    computerIndex.set(key, {...computer, requests, classInfo});
+    const row = positiveInteger(computer.grid_row ?? computer.row);
+    const column = positiveInteger(computer.grid_col ?? computer.col);
+    const position = placed && row && column
+        ? ` style="grid-row:${row};grid-column:${column}"`
+        : "";
+    const student = computer.student;
+    const userid = student ? (student.userid ?? student.username ?? "") : "";
+    const requestText = requests.length
+        ? `<span class="badge request-count">${requests.length} open request${requests.length === 1 ? "" : "s"}</span>`
+        : "";
+    return `<button type="button" class="computer-card${computerStateClass(requests)}" ` +
+        `data-computer-key="${esc(key)}"${position}>` +
+        `<span class="computer-name">${esc(computer.name || machineId)}</span>` +
+        (student
+            ? `<span class="student-id">${esc(userid)}</span>`
+            : `<span class="student-id">No student assigned</span>`) +
+        requestText +
+        `</button>`;
+}
+
+function selectClass(id, updateUrl = true) {
+    selectedClassId = id || null;
+    latestLayouts = [];
+    layoutLoaded = false;
+    layoutError = null;
+    if (updateUrl) {
+        const url = new URL(location.href);
+        if (selectedClassId) url.searchParams.set("class", selectedClassId);
+        else url.searchParams.delete("class");
+        history.replaceState(null, "", url);
+    }
+    renderOverview(latestState);
+    renderSelectedLayout();
+    if (selectedClassId) refreshLayouts();
+}
+
+function renderSelectedLayout() {
+    const section = document.getElementById("layout-section");
+    if (!selectedClassId) {
+        section.hidden = true;
+        return;
+    }
+    section.hidden = false;
+    const container = document.getElementById("class-layout");
+    const classInfo = latestLayouts.find(item => classId(item) === selectedClassId);
+    const summaryClass = latestState.classes.find(item => classId(item) === selectedClassId);
+    document.getElementById("layout-heading").textContent =
+        `${classInfo?.name || summaryClass?.name || "Class"} layout`;
+
+    if (!layoutLoaded) {
+        // Only the first load of a class shows a placeholder; periodic refreshes
+        // leave the current grid in place until replacement markup differs.
+        setMarkup(container, "Loading live layout...");
+        return;
+    }
+    if (!classInfo) {
+        setMarkup(container, `<div class="warning">${esc(layoutError ||
+            "The live layout is unavailable for this class.")}</div>`);
+        return;
+    }
+
+    computerIndex.clear();
+    const computers = [...(classInfo.computers || [])].sort((first, second) =>
+        (Number(first.sequence_num) || 0) - (Number(second.sequence_num) || 0) ||
+        String(first.name || "").localeCompare(String(second.name || ""))
+    );
+    const placed = computers.filter(computer =>
+        positiveInteger(computer.grid_row ?? computer.row) &&
+        positiveInteger(computer.grid_col ?? computer.col)
+    );
+    const unplaced = computers.filter(computer => !placed.includes(computer));
+    const maximumColumn = Math.max(
+        1,
+        ...placed.map(computer => positiveInteger(computer.grid_col ?? computer.col, 1))
+    );
+    const columns = positiveInteger(
+        classInfo.grid_cols ?? classInfo.layout?.grid_cols,
+        maximumColumn,
+        30
+    );
+
+    let html = layoutError ? `<div class="warning">${esc(layoutError)}</div>` : "";
+    if (placed.length) {
+        html += `<div class="room-shell"><div class="room-grid" ` +
+            `style="grid-template-columns:repeat(${columns}, 155px)">` +
+            placed.map(computer => computerCard(computer, classInfo, true)).join("") +
+            `</div></div>`;
+    }
+    if (unplaced.length) {
+        html += `<h3>Not placed on the grid</h3><div class="unplaced-grid">` +
+            unplaced.map(computer => computerCard(computer, classInfo, false)).join("") +
+            `</div>`;
+    }
+    setMarkup(
+        container,
+        html || `<p class="muted">No computers are configured for this class.</p>`
+    );
+    // The dialog stays open across refreshes, so refresh it from the rebuilt index.
+    renderComputerDialog();
+}
+
+function requestDetails(item) {
+    const destination = (item.toilets || []).map(value => value.name).join(", ");
+    if (item.type === "toilet") {
+        if (item.status === "active") return `Away${destination ? ` — ${esc(destination)}` : ""}`;
+        return `Waiting — queue #${esc(item.position || "?")}`;
+    }
+    return esc(item.status || "pending");
+}
+
+function dialogRequest(item) {
+    const label = item.type_label || item.type;
+    let action = "";
+    if (item.type === "toilet" && item.status === "active") {
+        action = `<div class="row"><input type="datetime-local" step="1" ` +
+            `id="dialog-return-${Number(item.id)}" aria-label="Return time for ${esc(item.username)}">` +
+            `<button type="button" data-return-id="${Number(item.id)}">Returned</button></div>`;
+    } else if (item.type !== "toilet") {
+        action = `<button type="button" data-resolve-id="${Number(item.id)}">Done</button>`;
+    }
+    return `<div class="card"><div class="row"><span><b>${esc(label)}</b><br>` +
+        `<span class="muted">${requestDetails(item)}</span></span>${action}</div></div>`;
+}
+
+function toiletRequestAction(computer, userid) {
+    if (!userid) {
+        return `<p class="muted">No student is assigned to this computer, so ` +
+            `there is nobody to place in the toilet queue.</p>`;
+    }
+    const open = computer.requests.find(item => item.type === "toilet");
+    if (open) {
+        return `<button type="button" disabled>Request toilet</button>` +
+            `<p class="muted">${esc(userid)} is already in the toilet queue — ` +
+            `${requestDetails(open)}.</p>`;
+    }
+    return `<button type="button" data-request-userid="${esc(userid)}">Request toilet</button>` +
+        `<p class="muted">Places ${esc(userid)} in the toilet queue for this class.</p>`;
+}
+
+function renderComputerDialog() {
+    if (!openComputerKey) return;
+    const computer = computerIndex.get(openComputerKey);
+    // A layout outage drops the index entry; keep the last known dialog contents
+    // rather than blanking a dialog the proctor is still reading.
+    if (!computer) return;
+    const student = computer.student;
+    const userid = student ? (student.userid ?? student.username ?? "") : "";
+    document.getElementById("computer-dialog-title").textContent =
+        `${computer.name || computer.machine_id} — ${computer.classInfo.name}`;
+    document.getElementById("computer-dialog-student").textContent = student
+        ? userid
+        : "No student assigned";
+    setMarkup(
+        document.getElementById("computer-dialog-actions"),
+        toiletRequestAction(computer, userid)
+    );
+    setMarkup(
+        document.getElementById("computer-dialog-requests"),
+        computer.requests.length
+            ? computer.requests.map(dialogRequest).join("")
+            : `<p class="muted">No open requests for this student.</p>`
+    );
+}
+
+function openComputerDialog(key) {
+    if (!computerIndex.has(key)) return;
+    openComputerKey = key;
+    renderComputerDialog();
+    const dialog = document.getElementById("computer-dialog");
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else dialog.setAttribute("open", "");
+}
+
+function closeComputerDialog() {
+    openComputerKey = null;
+    const dialog = document.getElementById("computer-dialog");
+    if (dialog.open && typeof dialog.close === "function") dialog.close();
+    else dialog.removeAttribute("open");
+}
+
+async function requestToilet(button, userid) {
+    button.disabled = true;
+    const body = new FormData();
+    body.append("userid", userid);
+    let response;
+    try {
+        response = await fetch(BASE + "/api/proctor/requests", {
+            method: "POST",
+            body,
+            headers: {"X-CSRF-Token": CSRF}
+        });
+    } catch {
+        button.disabled = false;
+        alert("The toilet request could not be sent.");
+        return;
+    }
+    if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        button.disabled = false;
+        alert(error.detail || "The toilet request could not be created.");
+        return;
+    }
+    // Deliberately keep the dialog open: the refreshed contents show the new
+    // queue position and prevent an accidental duplicate request. Drop the
+    // cached markup so the refresh always rewrites the button this call
+    // disabled, even if the rendered action text is unchanged.
+    renderedMarkup.delete(document.getElementById("computer-dialog-actions"));
+    await refresh();
+}
+
+function render(data) {
+    latestState = {
+        queue: data.queue || [],
+        support: data.support || [],
+        alerts: data.alerts || [],
+        classes: data.classes || [],
+        all_classes: data.all_classes ?? ALL_CLASSES,
+        layout_error: data.layout_error || null
+    };
+    if (data.layouts?.classes) {
+        latestLayouts = data.layouts.classes;
+        layoutLoaded = true;
+    }
+
+    if (!ALL_CLASSES && latestState.classes.length === 1 && !selectedClassId) {
+        selectedClassId = classId(latestState.classes[0]);
+    }
+    if (selectedClassId &&
+            !latestState.classes.some(item => classId(item) === selectedClassId)) {
+        selectedClassId = null;
+    }
+
+    renderOverview(latestState);
+    document.getElementById("overview-warning").hidden = !latestState.layout_error;
+    renderSelectedLayout();
+
+    setMarkup(document.getElementById("queue"), latestState.queue.length
+        ? latestState.queue.map(item => `
+            <div class="card row">
+                <span>
+                    <b>${esc(item.username)}</b>
+                    ${(item.classes || []).map(value => `<span class="badge">${esc(value.name)}</span>`).join("") ||
+                        '<span class="badge">class unknown</span>'}
+                    <br><span class="muted">${esc(item.status)} — ${(item.toilets || []).map(value => esc(value.name)).join(", ") ||
+                        "no toilet"}${item.blocked_reason ? ` — ${esc(item.blocked_reason)}` : ""}</span>
+                </span>
+                ${item.status === "active"
+                    ? `<span><input type="datetime-local" step="1" id="return-${Number(item.id)}" ` +
+                      `aria-label="Return time for ${esc(item.username)}">` +
+                      `<button type="button" data-queue-return-id="${Number(item.id)}">Returned</button></span>`
+                    : `<span>queue #${esc(item.position || "?")}</span>`}
+            </div>`).join("")
+        : "Queue is empty.");
+
+    setMarkup(document.getElementById("alerts"), latestState.alerts.length
+        ? latestState.alerts.map(alert => `
+            <div class="warning ${alert.severity === "urgent" ? "urgent" : ""}">
+                <b>${esc(alert.code)}</b> — student ${esc(alert.username)} —
+                class ${esc((alert.classes || []).map(item => item.name).join(", ") || "unknown")} —
+                reserved ${esc((alert.toilets || []).map(item => item.name).join(", ") || "none")}
+                <button type="button" data-alert-id="${Number(alert.id)}">Resolve</button>
+            </div>`).join("")
+        : "No open alerts.");
+
+    document.getElementById("support-section").hidden = !supportVisible();
+    setMarkup(document.getElementById("support"), latestState.support.length
+        ? `<table><tr><th>Class</th><th>Student</th><th>Request</th><th></th></tr>
+            ${latestState.support.map(item => `<tr>
+                <td>${esc((item.classes || []).map(value => value.name).join(", ") || "unknown")}</td>
+                <td>${esc(item.username)}</td><td>${esc(item.type_label)}</td>
+                <td><button type="button" data-support-id="${Number(item.id)}">Done</button></td>
+            </tr>`).join("")}</table>`
+        : "Nothing pending.");
+}
+
+async function refreshLayouts() {
+    if (!selectedClassId) {
+        latestLayouts = [];
+        layoutLoaded = false;
+        return;
+    }
+    const requestedClassId = selectedClassId;
+    // Keep any previously loaded layout, error banner, and open dialog visible
+    // while this request is in flight. selectClass resets both flags, so a class
+    // switch still shows the placeholder exactly once.
+    renderSelectedLayout();
+    let response;
+    try {
+        response = await fetch(
+            BASE + `/api/proctor/layouts?class_id=${encodeURIComponent(requestedClassId)}`
+        );
+    } catch {
+        if (requestedClassId !== selectedClassId) return;
+        layoutError = "The live layout is temporarily unavailable.";
+        layoutLoaded = true;
+        renderSelectedLayout();
+        return;
+    }
+    if (response.status === 403) {
+        location.href = BASE + "/operator/login";
+        return;
+    }
+    if (response.ok) {
+        const data = await response.json();
+        if (requestedClassId !== selectedClassId) return;
+        latestLayouts = data.classes || [];
+        layoutError = data.layout_error || null;
+    } else {
+        layoutError = "The live layout is temporarily unavailable.";
+    }
+    if (requestedClassId !== selectedClassId) return;
+    layoutLoaded = true;
+    renderSelectedLayout();
+}
+
+async function refresh() {
+    let response;
+    try {
+        response = await fetch(BASE + "/api/proctor/state");
+    } catch {
+        return;
+    }
+    if (response.status === 403) {
+        location.href = BASE + "/operator/login";
+        return;
+    }
+    if (response.ok) render(await response.json());
+    await refreshLayouts();
+}
+
+document.getElementById("class-overview").addEventListener("click", event => {
+    const button = event.target.closest("[data-class-id]");
+    if (button) selectClass(button.dataset.classId);
+});
+document.getElementById("close-layout").addEventListener("click", () => selectClass(null));
+document.getElementById("class-layout").addEventListener("click", event => {
+    const button = event.target.closest("[data-computer-key]");
+    if (button) openComputerDialog(button.dataset.computerKey);
+});
+document.getElementById("queue").addEventListener("click", event => {
+    const button = event.target.closest("[data-queue-return-id]");
+    if (button) returned(Number(button.dataset.queueReturnId));
+});
+document.getElementById("alerts").addEventListener("click", event => {
+    const button = event.target.closest("[data-alert-id]");
+    if (button) post(`/api/proctor/alerts/${Number(button.dataset.alertId)}/resolve`);
+});
+document.getElementById("support").addEventListener("click", event => {
+    const button = event.target.closest("[data-support-id]");
+    if (button) post(`/api/proctor/resolve/${Number(button.dataset.supportId)}`);
+});
+document.getElementById("computer-dialog").addEventListener("click", event => {
+    if (event.target.closest(".dialog-close")) {
+        closeComputerDialog();
+        return;
+    }
+    const requestButton = event.target.closest("[data-request-userid]");
+    if (requestButton) {
+        requestToilet(requestButton, requestButton.dataset.requestUserid);
+        return;
+    }
+    const returnButton = event.target.closest("[data-return-id]");
+    if (returnButton) {
+        const id = Number(returnButton.dataset.returnId);
+        returned(id, `dialog-return-${id}`);
+        return;
+    }
+    const resolveButton = event.target.closest("[data-resolve-id]");
+    if (resolveButton) {
+        post(`/api/proctor/resolve/${Number(resolveButton.dataset.resolveId)}`);
+    }
+});
+document.getElementById("computer-dialog").addEventListener("click", event => {
+    if (event.target === event.currentTarget) closeComputerDialog();
+});
+// Escape and the native close both bypass closeComputerDialog.
+document.getElementById("computer-dialog").addEventListener("close", () => {
+    openComputerKey = null;
+});
+
+let reconnectAttempts = 0;
+function connect() {
+    const scheme = location.protocol === "https:" ? "wss" : "ws";
+    const socket = new WebSocket(`${scheme}://${location.host}${BASE}/ws/staff`);
+    socket.onmessage = event => {
+        reconnectAttempts = 0;
+        render(JSON.parse(event.data));
+        refreshLayouts();
+    };
+    socket.onclose = () => {
+        const delay = Math.min(60000, 1000 * (2 ** Math.min(reconnectAttempts++, 5)));
+        setTimeout(connect, delay * (0.75 + Math.random() * 0.5));
+    };
+}
+
+refresh();
+connect();
+setInterval(refresh, 15000);
+</script>
+{% endblock %}

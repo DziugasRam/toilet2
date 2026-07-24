@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Operator login — LMIO toilet{% endblock %}
+{% block body %}
+<h1>Administrator / proctor login</h1>
+<p>These credentials and permissions are managed by the toilet application and are independent from Olimp-control logins.</p>
+<form method="post" action="{{ base_path }}/operator/login">
+    <p><input name="username" autocomplete="username" placeholder="username" required></p>
+    <p><input name="password" type="password" autocomplete="current-password" placeholder="password" required></p>
+    <button type="submit">Log in</button>
+</form>
+{% endblock %}
