@@ -37,6 +37,8 @@ def _root_path(value: str | None) -> str:
 @dataclass(frozen=True, slots=True)
 class Settings:
     database_url: str = ""
+    admin_username: str = ""
+    admin_password: str = ""
     app_root_path: str = ""
     public_origin: str = ""
     cookie_secure: bool = False
@@ -80,6 +82,10 @@ class Settings:
     def validate(self) -> "Settings":
         if not self.database_url:
             raise ValueError("TOILET_DATABASE_URL is required")
+        if bool(self.admin_username) != bool(self.admin_password):
+            raise ValueError(
+                "TOILET_ADMIN_USERNAME and TOILET_ADMIN_PASSWORD must be set together"
+            )
         if not self.cms_contests:
             raise ValueError("TOILET_CMS_CONTESTS is required")
         if not self.cms_multi_contest and len(self.cms_contests) != 1:
@@ -189,6 +195,12 @@ class Settings:
         defaults = cls()
         settings = cls(
             database_url=os.environ.get("TOILET_DATABASE_URL", defaults.database_url),
+            admin_username=os.environ.get(
+                "TOILET_ADMIN_USERNAME", defaults.admin_username
+            ).strip(),
+            admin_password=os.environ.get(
+                "TOILET_ADMIN_PASSWORD", defaults.admin_password
+            ),
             app_root_path=_root_path(os.environ.get("TOILET_ROOT_PATH")),
             public_origin=os.environ.get("TOILET_PUBLIC_ORIGIN", "").rstrip("/"),
             cookie_secure=_bool(os.environ.get("TOILET_COOKIE_SECURE")),

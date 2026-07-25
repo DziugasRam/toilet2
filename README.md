@@ -98,8 +98,9 @@ loaded independently from the checked-in CSV through
 administration but exposes no companion write API. The fixture materializes
 student sessions through real CMS login. Classes, computers, toilets, and
 mappings remain in their native interfaces. The toilet process itself never
-seeds a default identity or password. The helper's trust boundary, gated
-bootstrap, and removal instructions are in
+seeds an implicit default identity or password; the local Compose environment
+explicitly supplies its startup administrator pair. The helper's trust boundary,
+gated bootstrap, and removal instructions are in
 [`DEVELOPMENT_UI.md`](../DEVELOPMENT_UI.md).
 
 For a manually configured environment, set every required value from
@@ -114,21 +115,20 @@ credentials and permissions exist only in the toilet database. Alternate
 same-origin clients can read authenticated identity, role/scope, locale, and the
 CSRF token from `GET /api/session`.
 
-There is deliberately no default operator password. Provision the first local
-administrator explicitly; the CLI prompts twice and never accepts a password on
-the command line:
+To create an initial administrator on startup, optionally set both values before
+starting the application:
 
 ```powershell
-.\.venv\Scripts\python.exe -m toilet2.manage_operator toilet-admin `
-  --database-url sqlite:///C:/absolute/path/to/toilet2.db `
-  --display-name "Toilet administrator" --admin
+$env:TOILET_ADMIN_USERNAME = "toilet-admin"
+$env:TOILET_ADMIN_PASSWORD = "<strong password>"
 ```
 
-For gated automation, `--password-env NAME` reads an explicitly named environment
-variable. Use `--proctor` with either repeated `--class-scope UUID` or
-`--all-classes`. After bootstrap, authenticated administrators manage accounts
-through the admin UI/API. `--keep-password` updates an existing account without
-rotating its password.
+When both values are set, startup creates that enabled administrator only if the
+username is absent. Existing accounts are never changed, including when the
+environment password changes. If neither value is set, startup does not create
+an account; setting only one is a configuration error. After login, accounts are
+managed normally through the administrator UI. There is no operator-provisioning
+command or account-related start argument.
 
 Configuration is read from environment variables; `.env` files are not loaded by
 the application itself. [`toilet2/.env.sample`](.env.sample) documents every
@@ -180,14 +180,23 @@ TOILET_CONTROL_BASE_URL=https://control.internal.example.org
 TOILET_CONTROL_AUTH_KEY=<same dedicated key as Olimp-control>
 ```
 
+For a fresh database, normally also provide the optional startup-administrator
+pair so there is an account that can log in:
+
+```text
+TOILET_ADMIN_USERNAME=toilet-admin
+TOILET_ADMIN_PASSWORD=<strong password>
+```
+
 For multiple simultaneously served CMS contests, list all contest names in
 `TOILET_CMS_CONTESTS` and set `TOILET_CMS_MULTI_CONTEST=true`.
 
 Always run exactly one Uvicorn worker using `toilet2.main:create_app --factory`.
 SQLite serializes across connections too, but queue notifications and the
 in-process mutation coordinator are intentionally single-process. Startup
-initializes/migrates the schema, purges expired sessions, and synchronizes the
-student roster once. Administrators can repeat that student sync explicitly.
+initializes/migrates the schema, creates the configured startup administrator if
+its username is absent, purges expired sessions, and synchronizes the student
+roster once. Administrators can repeat that student sync explicitly.
 Class names/order, computer placement, and assigned students are read from
 Olimp-control on each relevant HTTP/WebSocket request; only the class UUID to
 toilet mapping is local. During upgrade, an unmatched synthetic legacy class UUID
@@ -198,8 +207,10 @@ untouched and reported visibly in the admin page and audit log.
 
 ### Docker Compose deployment
 
-The production Docker setup runs one unprivileged Toilet2 container and stores
-the SQLite database, WAL, and SHM files together in the persistent
+The production Docker setup runs one unprivileged Toilet2 container behind a
+dedicated nginx-certbot container. Only nginx publishes ports 80 and 443;
+Toilet2 remains private on the Compose network at `toilet2:8000`. The SQLite
+database, WAL, and SHM files stay together in the persistent
 `lmio-toilet-data` Docker volume. From the standalone `toilet2` repository root:
 
 ```bash
@@ -207,70 +218,91 @@ cp .env.ec2.sample .env
 chmod 600 .env
 sudoedit .env
 
-sudo docker compose config
-sudo docker compose build
-sudo docker compose run --rm --no-deps toilet2 \
-  python -m toilet2.manage_operator toilet-admin \
-  --display-name "Toilet administrator" --admin
+sudo docker compose config -q
+sudo docker compose build toilet2
+
+# Stop the old nginx container/stack first so ports 80 and 443 are free.
 sudo docker compose up -d
 sudo docker compose ps
-sudo docker compose logs -f toilet2
+sudo docker compose logs -f nginx toilet2
 ```
 
-The operator command prompts twice for a password and initializes the same
-database volume used by the service. There is no separate Toilet2 migration
-command: the provisioning CLI and application startup initialize or upgrade the
-SQLite schema. Startup also attempts a roster synchronization, but a Control
-failure is logged and does not fail the process health check. Confirm the sync
-explicitly from the Toilet administrator page.
+For a fresh database, set both `TOILET_ADMIN_USERNAME` and
+`TOILET_ADMIN_PASSWORD` in the protected `.env`. Startup creates that
+administrator only if the username is absent. It never changes an existing
+account, even when the environment password changes; the pair may be omitted
+when no startup creation is needed. Manage accounts normally through the
+authenticated administrator UI. There is no separate Toilet2 migration command:
+application startup initializes or upgrades the SQLite schema. Startup also
+attempts a roster synchronization, but a Control failure is logged and does not
+fail the process health check. Confirm the sync explicitly from the Toilet
+administrator page.
 
 The EC2 sample keeps `TOILET_CONTROL_BASE_URL=https://ctrl.lmio.lt` so TLS
 verifies the deployed certificate, while Compose resolves that name to
 `172.31.47.173` inside the container. Prefer Route 53 private DNS over the
 included static mapping when available. The Control proxy and Django
-`ALLOWED_HOSTS` must accept `ctrl.lmio.lt`. Set
-`TOILET_FORWARDED_ALLOW_IPS` to the immediate trusted CMS proxy address or the
-narrowest applicable network.
+`ALLOWED_HOSTS` must accept `ctrl.lmio.lt`.
 
-The container publishes port 8000 because the CMS proxy is on another instance.
-The Toilet EC2 security group must allow that port only from the CMS proxy
-security group. Do not expose it publicly. Continue to serve the browser-facing
-application only at `/toilet/` on the CMS HTTPS origin.
+Point public DNS for `paslaugos.cms.lmio.lt` at this EC2 instance and allow
+inbound TCP 80 and 443 in its security group. Do not open port 8000. The bundled
+nginx configuration serves Toilet2 at
+`https://paslaugos.cms.lmio.lt/`, obtains and renews its certificate, redirects
+HTTP to HTTPS, and proxies WebSocket upgrades. Its certificate state is kept in
+the named `lmio-toilet-nginx-secrets` volume.
 
-The named volume survives image rebuilds, container replacement, and ordinary
+If the nginx stack being replaced already has the certificate on this same
+Docker host, find its actual volume name before cutover and set
+`TOILET_NGINX_SECRETS_VOLUME` to that exact name. Otherwise the new stack creates
+a fresh volume and requests a new certificate. Stop the old nginx before
+starting this stack because both need host ports 80 and 443.
+
+Both named volumes survive image rebuilds, container replacement, and ordinary
 `docker compose down`. Never run `docker compose down -v` unless intentionally
-deleting all Toilet2 state. Keep Docker data on persistent encrypted EBS and use
-a SQLite-aware online backup while the service is running; do not copy only the
-live `toilet.db` file because committed data may still be in its WAL.
+deleting all Toilet2 data and certificate state. Keep Docker data on persistent
+encrypted EBS and use a SQLite-aware online backup while the service is running;
+do not copy only the live `toilet.db` file because committed data may still be
+in its WAL.
 
 To update the service after taking a backup:
 
 ```bash
 git pull
 sudo docker compose up --build -d
-sudo docker compose logs --tail=100 toilet2
+sudo docker compose logs --tail=100 nginx toilet2
 ```
 
-The direct process-level health probe is:
+The private process-level health probe is:
 
 ```bash
-curl -fsS http://127.0.0.1:8000/operator/login >/dev/null
+sudo docker compose exec -T toilet2 python -c \
+  "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/operator/login', timeout=5).read(1)"
+```
+
+The public HTTPS probe is:
+
+```bash
+curl -fsS https://paslaugos.cms.lmio.lt/operator/login >/dev/null
 ```
 
 Run exactly one Compose service instance and never scale the `toilet2` service;
 the mutation coordinator and WebSocket fanout are intentionally single-process.
 
-## Reverse proxy requirements
+## Reverse proxy and CMS authentication
 
-Mount the app on the same browser origin as CWS so CMS cookies are sent to it. The
-proxy must:
+The bundled proxy serves Toilet2 at the root of its dedicated hostname, so use
+an empty `TOILET_ROOT_PATH` and
+`TOILET_PUBLIC_ORIGIN=https://paslaugos.cms.lmio.lt`. Keep
+`TOILET_CMS_BASE_URL` pointed at the actual CMS ContestWebServer that implements
+`/api/toilet-auth`; pointing it at the dedicated Toilet2 hostname would loop
+back to this application.
 
-- strip `/toilet` before forwarding while the app has
-  `TOILET_ROOT_PATH=/toilet`;
-- proxy WebSocket upgrades for `/toilet/ws/`;
-- preserve the browser Host/scheme used by `TOILET_PUBLIC_ORIGIN`;
-- pass the actual immediate client address to the app; and
-- allow the app to contact CWS.
+CMS contestant authentication also requires the browser to send its existing
+CMS login cookie to Toilet2. Host-only cookies are not sent to a separate
+hostname. Leave `TOILET_STUDENT_UI_ENABLED=false` for operator-only operation
+unless the CMS cookie Domain is deliberately configured and verified to cover
+`paslaugos.cms.lmio.lt`. Otherwise, serve Toilet2 below `/toilet/` on the actual
+CMS browser origin instead of using this dedicated-host configuration.
 
 The toilet service sends that client address to CWS as `X-Forwarded-For`. Increase
 CMS `num_proxies_used` for the additional toilet-service-to-CWS hop and verify this

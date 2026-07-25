@@ -617,6 +617,21 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await run_in_threadpool(db.initialize)
+        if config.admin_username:
+            operators = await run_in_threadpool(app.state.mutations.list_operators)
+            if not any(
+                operator["username"] == config.admin_username
+                for operator in operators
+            ):
+                await run_in_threadpool(
+                    lambda: app.state.mutations.upsert_operator(
+                        username=config.admin_username,
+                        display_name=config.admin_username,
+                        password=config.admin_password,
+                        roles={"admin"},
+                        actor=Actor.system("environment-admin"),
+                    )
+                )
         await run_in_threadpool(app.state.mutations.purge_expired_sessions)
         app.state.hub.loop = asyncio.get_running_loop()
         await _sync_students(app)

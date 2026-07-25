@@ -23,6 +23,25 @@ def test_defaults_fail_closed_without_database_origin_contest_or_control_key():
         Settings().validate()
 
 
+def test_startup_admin_environment_requires_both_values():
+    with pytest.raises(ValueError, match="must be set together"):
+        cms_settings(admin_username="startup-admin").validate()
+
+
+def test_startup_admin_is_loaded_from_environment(monkeypatch):
+    monkeypatch.setenv("TOILET_DATABASE_URL", "sqlite:///test.db")
+    monkeypatch.setenv("TOILET_ADMIN_USERNAME", "startup-admin")
+    monkeypatch.setenv("TOILET_ADMIN_PASSWORD", "startup-password")
+    monkeypatch.setenv("TOILET_PUBLIC_ORIGIN", "http://testserver")
+    monkeypatch.setenv("TOILET_CMS_CONTESTS", "contest")
+    monkeypatch.setenv("TOILET_CONTROL_AUTH_KEY", "test-key")
+
+    settings = Settings.from_env()
+
+    assert settings.admin_username == "startup-admin"
+    assert settings.admin_password == "startup-password"
+
+
 def test_retired_dev_auth_mode_is_rejected(monkeypatch):
     monkeypatch.setenv("TOILET_AUTH_MODE", "dev")
     with pytest.raises(ValueError, match="no longer supports"):

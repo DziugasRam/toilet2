@@ -433,6 +433,44 @@ def test_operator_login_uses_toilet_local_roles(tmp_path):
         assert closed.value.code == 4403
 
 
+def test_environment_admin_is_created_only_when_missing(tmp_path):
+    settings = Settings(
+        admin_username="startup-admin",
+        admin_password="first-environment-password",
+        public_origin="http://testserver",
+        cms_contests=("contest",),
+        control_auth_key="test-key",
+    )
+    with app_client(tmp_path, settings=settings) as (app, _client):
+        account = app.state.mutations.authenticate_operator(
+            "startup-admin", "first-environment-password"
+        )
+        assert account is not None
+        assert account["roles"] == {"admin"}
+        app.state.mutations.upsert_operator(
+            username="startup-admin",
+            display_name="Changed in the UI",
+            password="ui-changed-password",
+            roles={"admin"},
+            actor=Actor.system("test"),
+        )
+
+    with app_client(tmp_path, settings=settings) as (app, _client):
+        assert (
+            app.state.mutations.authenticate_operator(
+                "startup-admin", "first-environment-password"
+            )
+            is None
+        )
+        account = app.state.mutations.authenticate_operator(
+            "startup-admin", "ui-changed-password"
+        )
+        assert account["display_name"] == "Changed in the UI"
+        assert [item["username"] for item in app.state.mutations.list_operators()] == [
+            "startup-admin"
+        ]
+
+
 def test_legacy_unsafe_operator_username_remains_deletable(tmp_path):
     with app_client(tmp_path) as (app, client):
         admin = login_operator(client, app)
