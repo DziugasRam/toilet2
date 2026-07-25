@@ -39,9 +39,20 @@
         .room-grid {
             display: grid;
             gap: .55rem;
-            min-width: max-content;
+            /* Intrinsic width regardless of the container, so the measured width
+               published as --room-width never depends on the bleed it causes. */
+            width: max-content;
             align-items: stretch;
             grid-auto-rows: minmax(105px, auto);
+        }
+        /* Computer cards are a fixed width, so a wide class needs more room than the
+           reading column. --room-width, set by the proctor view once the grid has
+           rendered, lets the section bleed symmetrically out of the column, up to the
+           viewport, before .room-shell falls back to horizontal scrolling. The gutter
+           leaves space for a classic vertical scrollbar, which 100vw includes. */
+        .room-bleed {
+            --room-bleed-width: max(0px, min(var(--room-width, 0px) + .3rem, 100vw - 3rem) - 100%);
+            margin-inline: calc(-1 * var(--room-bleed-width) / 2);
         }
         .computer-card {
             width: 155px;
@@ -65,9 +76,11 @@
         .computer-card.has-active { border-left-color: #18783a; background: #f2fbf5; }
         .computer-card.has-urgent { border-left-color: #b42318; background: #fff1f1; }
         .computer-name, .student-name, .student-id { display: block; }
-        .computer-name { font-weight: 700; margin-bottom: .45rem; }
+        /* The student is what a proctor scans a layout for, so the user id leads and
+           the computer it identifies is the supporting line. */
+        .student-id { font-weight: 700; margin-bottom: .4rem; }
         .student-name { font-size: .9rem; }
-        .student-id { color: #666; font-size: .78rem; }
+        .computer-name { color: #666; font-size: .78rem; }
         .request-count { margin-top: .45rem; }
         .unplaced-grid {
             display: grid;

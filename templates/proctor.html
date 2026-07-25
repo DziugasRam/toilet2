@@ -20,12 +20,11 @@
     <div id="class-overview" class="class-grid" aria-live="polite">Loading...</div>
 </section>
 
-<section id="layout-section" aria-labelledby="layout-heading" hidden>
+<section id="layout-section" class="room-bleed" aria-labelledby="layout-heading" hidden>
     <div class="row">
         <h2 id="layout-heading">Class layout</h2>
         <button id="close-layout" type="button"{% if not principal.all_classes %} hidden{% endif %}>Close layout</button>
     </div>
-    <p id="layout-note" class="muted">Layout and student locations are read live from Olimp-control.</p>
     <div id="class-layout" aria-live="polite">Loading...</div>
 </section>
 
@@ -78,6 +77,20 @@ function setMarkup(element, html) {
     renderedMarkup.set(element, html);
     element.innerHTML = html;
     return true;
+}
+
+// The room grid is fixed-width per computer, so a wide class outgrows the reading
+// column. Publishing the grid's intrinsic width lets the layout section widen past
+// the column instead of scrolling inside it; see .room-bleed. Writing the layout
+// always goes through this so a narrower class (or a placeholder) drops the width.
+function setLayoutMarkup(html) {
+    const container = document.getElementById("class-layout");
+    setMarkup(container, html);
+    const grid = container.querySelector(".room-grid");
+    document.getElementById("layout-section").style.setProperty(
+        "--room-width",
+        grid ? `${Math.ceil(grid.getBoundingClientRect().width)}px` : "0px"
+    );
 }
 
 let latestState = {queue: [], support: [], alerts: [], classes: [], all_classes: ALL_CLASSES};
@@ -208,10 +221,8 @@ function computerCard(computer, classInfo, placed) {
         : "";
     return `<button type="button" class="computer-card${computerStateClass(requests)}" ` +
         `data-computer-key="${esc(key)}"${position}>` +
+        `<span class="student-id">${student ? esc(userid) : "No student assigned"}</span>` +
         `<span class="computer-name">${esc(computer.name || machineId)}</span>` +
-        (student
-            ? `<span class="student-id">${esc(userid)}</span>`
-            : `<span class="student-id">No student assigned</span>`) +
         requestText +
         `</button>`;
 }
@@ -239,7 +250,6 @@ function renderSelectedLayout() {
         return;
     }
     section.hidden = false;
-    const container = document.getElementById("class-layout");
     const classInfo = latestLayouts.find(item => classId(item) === selectedClassId);
     const summaryClass = latestState.classes.find(item => classId(item) === selectedClassId);
     document.getElementById("layout-heading").textContent =
@@ -248,11 +258,11 @@ function renderSelectedLayout() {
     if (!layoutLoaded) {
         // Only the first load of a class shows a placeholder; periodic refreshes
         // leave the current grid in place until replacement markup differs.
-        setMarkup(container, "Loading live layout...");
+        setLayoutMarkup("Loading live layout...");
         return;
     }
     if (!classInfo) {
-        setMarkup(container, `<div class="warning">${esc(layoutError ||
+        setLayoutMarkup(`<div class="warning">${esc(layoutError ||
             "The live layout is unavailable for this class.")}</div>`);
         return;
     }
@@ -289,8 +299,7 @@ function renderSelectedLayout() {
             unplaced.map(computer => computerCard(computer, classInfo, false)).join("") +
             `</div>`;
     }
-    setMarkup(
-        container,
+    setLayoutMarkup(
         html || `<p class="muted">No computers are configured for this class.</p>`
     );
     // The dialog stays open across refreshes, so refresh it from the rebuilt index.
